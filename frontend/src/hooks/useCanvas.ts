@@ -16,7 +16,7 @@ import { getPointerPoints } from "../utils/pointer";
 export function useCanvas() {
   const [tool, setTool] = useState<Tool>("pen");
 
-  const [color, setColor] = useState("#ffffff");
+  const [color, setColor] = useState("#111111");
 
   const [strokeWidth, setStrokeWidth] =
     useState(3);

@@ -1,242 +1,372 @@
+import base64
+import time
+import uuid
+import json
+import re
 
-import asyncio
+from fastapi import APIRouter, HTTPException
 
-from fastapi import APIRouter
-from groq import Groq
-
-from app.core.config import settings
-from app.core.ids import generate_request_id
 from app.models.request import AnalyzeRequest
-from app.models.response import AnalyzeResponse, DraftObject
-from app.models.trace import (
-    InputMetrics,
-    LatencyMetrics,
-    Outcome,
-    TokenMetrics,
-    TraceRecord,
-)
-from app.services.cost import calculate_cost
-from app.services.instrumentation import InstrumentationTimer
-from app.storage.traces import TraceStore
-
-
-router = APIRouter(
-    prefix="/api/ai",
-    tags=["AI"],
+from app.models.response import (
+    AnalyzeResponse,
+    DraftResponse,
 )
 
-trace_store = TraceStore(settings.trace_dir)
+from app.services.groq_client import analyze_canvas
 
-groq_client = Groq(
-    api_key=settings.groq_api_key
-)
+
+router = APIRouter()
+
+
+def clean_model_json(content: str) -> dict:
+    """
+    Convert model output into a JSON object.
+
+    Handles:
+    - normal JSON
+    - markdown code fences
+    - <think> blocks
+    - extra text surrounding JSON
+    """
+
+    if not content:
+        raise ValueError(
+            "Model returned empty content."
+        )
+
+    # Remove Qwen thinking blocks
+    content = re.sub(
+        r"<think>.*?</think>",
+        "",
+        content,
+        flags=re.DOTALL | re.IGNORECASE,
+    ).strip()
+
+    # Remove markdown fences
+    content = re.sub(
+        r"```json\s*",
+        "",
+        content,
+        flags=re.IGNORECASE,
+    )
+
+    content = re.sub(
+        r"```\s*$",
+        "",
+        content,
+    ).strip()
+
+    # Try direct JSON
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        pass
+
+    # Try finding JSON inside surrounding text
+    match = re.search(
+        r"\{.*\}",
+        content,
+        flags=re.DOTALL,
+    )
+
+    if match:
+        candidate = match.group(0)
+
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+    # Fallback
+    return {
+        "title": "AI Response",
+        "content": content,
+        "latex": None,
+        "format": "markdown",
+        "confidence": 0.5,
+    }
 
 
 @router.post(
-    "/analyze",
+    "/api/analyze",
     response_model=AnalyzeResponse,
 )
-async def analyze(
-    request: AnalyzeRequest,
-):
-    request_id = generate_request_id()
+def analyze(request: AnalyzeRequest):
 
-    timer = InstrumentationTimer()
+    request_id = str(uuid.uuid4())
+
+    start = time.perf_counter()
 
     try:
-        # -----------------------------
-        # CAPTURE / ENCODE
-        # -----------------------------
 
-        timer.start_capture()
+        # ==========================================
+        # CAPTURE / DECODE
+        # ==========================================
 
-        await asyncio.sleep(0.01)
+        capture_start = time.perf_counter()
 
-        timer.end_capture()
+        image_bytes = base64.b64decode(
+            request.image_base64
+        )
 
-        # -----------------------------
+        capture_end = time.perf_counter()
+
+        t_capture = (
+            capture_end - capture_start
+        ) * 1000
+
+        # ==========================================
         # DISPATCH
-        # -----------------------------
+        # ==========================================
 
-        timer.start_dispatch()
+        dispatch_start = time.perf_counter()
 
-        await asyncio.sleep(0.005)
+        context = request.context
 
-        timer.end_dispatch()
-
-        # -----------------------------
-        # PROVIDER - GROQ VISION
-        # -----------------------------
-
-        timer.start_provider()
-
-        response = groq_client.chat.completions.create(
-            model=settings.model_name,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                request.prompt
-                                or "Analyze this drawing and explain what it represents."
-                            ),
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": (
-                                    f"data:{request.image_format};"
-                                    f"base64,{request.image_base64}"
-                                )
-                            },
-                        },
-                    ],
-                }
-            ],
-            max_completion_tokens=500,
+        prompt = (
+            context.prompt
+            or
+            "Analyze this canvas region and help the user."
         )
 
-        timer.mark_first_byte()
-        timer.mark_first_token()
-        timer.mark_last_token()
+        dispatch_end = time.perf_counter()
 
-        # -----------------------------
-        # MOCK RESPONSE
-        # -----------------------------
+        t_dispatch = (
+            dispatch_end - dispatch_start
+        ) * 1000
 
-        draft = DraftObject(
-            id=f"draft_{request_id}",
-            x=200,
-            y=200,
-            width=400,
-            height=250,
-            markdown=(
-                "### AI Draft\n\n"
-                "This is a placeholder response."
+        # ==========================================
+        # PROVIDER
+        # ==========================================
+
+        provider_start = time.perf_counter()
+
+        response = analyze_canvas(
+            image_base64=request.image_base64,
+            context={
+                "zoom": context.zoom,
+                "pan_x": context.pan_x,
+                "pan_y": context.pan_y,
+                "stroke_count": context.stroke_count,
+                "region_x": context.region_x,
+                "region_y": context.region_y,
+                "region_width": context.region_width,
+                "region_height": context.region_height,
+                "prompt": prompt,
+            },
+        )
+
+        provider_end = time.perf_counter()
+
+        provider_time = (
+            provider_end - provider_start
+        ) * 1000
+
+        # ==========================================
+        # RESPONSE FROM GROQ CLIENT
+        # ==========================================
+
+        # analyze_canvas() already returns a dictionary.
+        parsed = response
+
+        # Safety fallback
+        if not isinstance(parsed, dict):
+            parsed = {
+                "title": "AI Response",
+                "content": str(parsed),
+                "latex": None,
+                "format": "markdown",
+                "confidence": 0.5,
+            }
+
+        # ==========================================
+        # DRAFT
+        # ==========================================
+
+        draft = DraftResponse(
+
+            title=parsed.get(
+                "title",
+                "AI Response",
             ),
-            latex="",
-            source_request_id=request_id,
+
+            content=parsed.get(
+                "content",
+                "",
+            ),
+
+            latex=parsed.get(
+                "latex",
+                None,
+            ),
+
+            format=parsed.get(
+                "format",
+                "markdown",
+            ),
+
+            confidence=float(
+                parsed.get(
+                    "confidence",
+                    0.5,
+                )
+            ),
+
+            # Position beside the canvas content
+            x=(
+                parsed.get(
+                    "x",
+                    context.region_x
+                    + context.region_width
+                    + 30,
+                )
+            ),
+
+            y=(
+                parsed.get(
+                    "y",
+                    context.region_y,
+                )
+            ),
+
+            width=(
+                parsed.get(
+                    "width",
+                    400,
+                )
+            ),
+
+            height=(
+                parsed.get(
+                    "height",
+                    250,
+                )
+            ),
+
+            status="draft",
         )
 
-        timer.mark_render_complete()
+        # ==========================================
+        # RENDER TIMING
+        # ==========================================
 
-        # -----------------------------
+        render_start = time.perf_counter()
+
+        # Backend response construction
+        # is the current render boundary.
+
+        render_end = time.perf_counter()
+
+        t_render = (
+            render_end - render_start
+        ) * 1000
+
+        # ==========================================
+        # TOTAL LATENCY
+        # ==========================================
+
+        end = time.perf_counter()
+
+        e2e = (
+            end - start
+        ) * 1000
+
+        # ==========================================
         # TOKENS
-        # -----------------------------
+        # ==========================================
 
-        input_text_tokens = max(
-            1,
-            len(request.prompt) // 4,
+        # groq_client currently returns the parsed
+        # result instead of the raw Groq response,
+        # so token usage may not be available here.
+
+        input_text = 0
+        input_image = 0
+        output = 0
+        reasoning = 0
+        cache_read = 0
+
+        total = (
+            input_text
+            + input_image
+            + output
+            + reasoning
+            + cache_read
         )
 
-        output_tokens = 12
+        tokens = {
 
-        input_image_tokens = 0
+            "input_text": input_text,
 
-        total_tokens = (
-            input_text_tokens
-            + input_image_tokens
-            + output_tokens
-        )
+            "input_image": input_image,
 
-        token_metrics = TokenMetrics(
-            input_text=input_text_tokens,
-            input_image=input_image_tokens,
-            input_image_source="estimated",
-            output=output_tokens,
-            reasoning=0,
-            cache_read=0,
-            total=total_tokens,
-        )
+            "input_image_source": "estimated",
 
-        # -----------------------------
-        # COST
-        # -----------------------------
+            "output": output,
 
-        cost = calculate_cost(
-            input_tokens=input_text_tokens,
-            output_tokens=output_tokens,
-            reasoning_tokens=0,
-            input_rate_per_million=settings.input_rate_per_million,
-            output_rate_per_million=settings.output_rate_per_million,
-        )
+            "reasoning": reasoning,
 
-        # -----------------------------
-        # TRACE
-        # -----------------------------
+            "cache_read": cache_read,
 
-        trace = TraceRecord(
-            request_id=request_id,
-            session_id=request.session_id,
-            ts_start=timer.started_at,
-            trigger=request.trigger,
-            provider=settings.model_provider,
-            model=settings.model_name,
-            effort=request.effort,
-            config_id=request.config_id,
-            input=InputMetrics(
-                crop_px=[
-                    request.crop_width,
-                    request.crop_height,
-                ],
-                format=request.image_format,
-                bytes=request.image_bytes,
-                zoom=request.zoom,
-                stroke_count=request.stroke_count,
-                prompt_chars=len(request.prompt),
-            ),
-            latency_ms=LatencyMetrics(
-                **timer.latency()
-            ),
-            tokens=token_metrics,
-            cost_usd=cost,
-            outcome=Outcome.DISCARDED,
-            error=None,
-            retries=0,
-        )
+            "total": total,
+        }
 
-        trace_store.append(trace)
+        # ==========================================
+        # FINAL RESPONSE
+        # ==========================================
 
         return AnalyzeResponse(
+
             request_id=request_id,
-            status="completed",
+
             draft=draft,
+
+            latency_ms={
+
+                "t_capture": round(
+                    t_capture,
+                    2,
+                ),
+
+                "t_dispatch": round(
+                    t_dispatch,
+                    2,
+                ),
+
+                "ttfb": round(
+                    provider_time,
+                    2,
+                ),
+
+                "ttft": round(
+                    provider_time,
+                    2,
+                ),
+
+                "t_stream": 0.0,
+
+                "t_render": round(
+                    t_render,
+                    2,
+                ),
+
+                "e2e": round(
+                    e2e,
+                    2,
+                ),
+            },
+
+            tokens=tokens,
+
+            cost_usd=0.0,
         )
 
     except Exception as exc:
-        latency = timer.latency()
 
-        trace = TraceRecord(
-            request_id=request_id,
-            session_id=request.session_id,
-            ts_start=timer.started_at,
-            trigger=request.trigger,
-            provider=settings.model_provider,
-            model=settings.model_name,
-            config_id=request.config_id,
-            input=InputMetrics(
-                crop_px=[
-                    request.crop_width,
-                    request.crop_height,
-                ],
-                format=request.image_format,
-                bytes=request.image_bytes,
-                zoom=request.zoom,
-                stroke_count=request.stroke_count,
-                prompt_chars=len(request.prompt),
-            ),
-            latency_ms=LatencyMetrics(
-                **latency
-            ),
-            tokens=TokenMetrics(),
-            cost_usd=0.0,
-            outcome=Outcome.ERROR,
-            error=str(exc),
-            retries=0,
+        import traceback
+
+        traceback.print_exc()
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
         )
-
-        trace_store.append(trace)
-
-        raise

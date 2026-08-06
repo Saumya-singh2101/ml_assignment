@@ -1,227 +1,1161 @@
+import React, { useEffect, useRef, useState } from "react";
+import { useCanvas } from "../hooks/useCanvas";
 
-import { useEffect, useRef } from "react";
+type Draft = {
+  title: string;
+  content: string;
+  latex?: string | null;
+  format: string;
+  confidence: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  status: "draft" | "accepted" | "discarded";
+};
 
-import type { Stroke, Tool } from "../models/stroke";
+const API_URL = "http://127.0.0.1:8000/api/analyze";
 
-interface CanvasProps {
-  strokes: Stroke[];
-  selectedIds: string[];
-  tool: Tool;
-  color: string;
-  strokeWidth: number;
-  zoom: number;
-  pan: {
-    x: number;
-    y: number;
-  };
+export default function Canvas() {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  onPointerDown: (
-    event: React.PointerEvent<HTMLCanvasElement>
-  ) => void;
+  const {
+    tool,
+    setTool,
+    color,
+    setColor,
+    strokeWidth,
+    setStrokeWidth,
+    zoom,
+    pan,
+    strokes,
+    selectedIds,
+    undo,
+    redo,
+    canUndo,
+    canRedo,
+    deleteSelected,
+    handlePointerDown,
+    handlePointerMove,
+    handlePointerUp,
+    handleWheel,
+  } = useCanvas();
 
-  onPointerMove: (
-    event: React.PointerEvent<HTMLCanvasElement>
-  ) => void;
+  const [draft, setDraft] = useState<Draft | null>(null);
+  const [loading, setLoading] = useState(false);
 
-  onPointerUp: (
-    event: React.PointerEvent<HTMLCanvasElement>
-  ) => void;
-
-  onWheel: (
-    event: React.WheelEvent<HTMLCanvasElement>
-  ) => void;
-
-  onClearSelection: () => void;
-}
-
-function Canvas({
-  strokes,
-  selectedIds,
-  tool,
-  zoom,
-  pan,
-  onPointerDown,
-  onPointerMove,
-  onPointerUp,
-  onWheel,
-  onClearSelection,
-}: CanvasProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  /*
+   * ============================
+   * RENDER CANVAS
+   * ============================
+   */
 
   useEffect(() => {
     const canvas = canvasRef.current;
 
     if (!canvas) return;
 
-    const context = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d");
 
-    if (!context) return;
+    if (!ctx) return;
 
     const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
 
-    const width = window.innerWidth;
-    const height = window.innerHeight;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
 
-    canvas.width = width * dpr;
-    canvas.height = height * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    canvas.style.width = `${width}px`;
-    canvas.style.height = `${height}px`;
+    ctx.clearRect(
+      0,
+      0,
+      rect.width,
+      rect.height
+    );
 
-    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // White background
+    ctx.fillStyle = "#ffffff";
 
-    context.clearRect(0, 0, width, height);
+    ctx.fillRect(
+      0,
+      0,
+      rect.width,
+      rect.height
+    );
 
-    // Background
-    context.fillStyle = "#0a0a0a";
-    context.fillRect(0, 0, width, height);
+    /*
+     * Pan + Zoom
+     */
 
-    // Canvas world transform
-    context.save();
+    ctx.save();
 
-    context.translate(pan.x, pan.y);
-    context.scale(zoom, zoom);
+    ctx.translate(
+      pan.x,
+      pan.y
+    );
 
-    // Draw grid
-    drawGrid(context, width, height, zoom, pan);
+    ctx.scale(
+      zoom,
+      zoom
+    );
 
-    // Draw strokes
+    /*
+     * Draw strokes
+     */
+
     for (const stroke of strokes) {
-      if (stroke.points.length < 1) {
+      if (
+        !stroke.points ||
+        stroke.points.length === 0
+      ) {
         continue;
       }
 
-      const selected = selectedIds.includes(stroke.id);
+      ctx.beginPath();
 
-      drawStroke(context, stroke, selected);
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+
+      ctx.strokeStyle =
+        stroke.color;
+
+      /*
+       * Pressure
+       */
+
+      const firstPoint =
+        stroke.points[0];
+
+      const pressure =
+        firstPoint.pressure || 0.5;
+
+      ctx.lineWidth =
+        stroke.width *
+        (0.65 + pressure * 0.7);
+
+      /*
+       * Start
+       */
+
+      ctx.moveTo(
+        stroke.points[0].x,
+        stroke.points[0].y
+      );
+
+      /*
+       * Smooth stroke
+       */
+
+      if (
+        stroke.points.length === 1
+      ) {
+        ctx.lineTo(
+          stroke.points[0].x + 0.01,
+          stroke.points[0].y + 0.01
+        );
+      } else {
+        for (
+          let i = 1;
+          i < stroke.points.length - 1;
+          i++
+        ) {
+          const current =
+            stroke.points[i];
+
+          const next =
+            stroke.points[i + 1];
+
+          const midX =
+            (current.x + next.x) / 2;
+
+          const midY =
+            (current.y + next.y) / 2;
+
+          ctx.quadraticCurveTo(
+            current.x,
+            current.y,
+            midX,
+            midY
+          );
+        }
+
+        const last =
+          stroke.points[
+            stroke.points.length - 1
+          ];
+
+        ctx.lineTo(
+          last.x,
+          last.y
+        );
+      }
+
+      ctx.stroke();
+
+      /*
+       * Selection box
+       */
+
+      if (
+        selectedIds.includes(
+          stroke.id
+        )
+      ) {
+        ctx.save();
+
+        ctx.strokeStyle =
+          "#2563eb";
+
+        ctx.lineWidth =
+          1 / zoom;
+
+        ctx.setLineDash([
+          6 / zoom,
+          4 / zoom,
+        ]);
+
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+
+        for (
+          const point of stroke.points
+        ) {
+          minX = Math.min(
+            minX,
+            point.x
+          );
+
+          minY = Math.min(
+            minY,
+            point.y
+          );
+
+          maxX = Math.max(
+            maxX,
+            point.x
+          );
+
+          maxY = Math.max(
+            maxY,
+            point.y
+          );
+        }
+
+        const padding = 8;
+
+        ctx.strokeRect(
+          minX - padding,
+          minY - padding,
+          maxX -
+            minX +
+            padding * 2,
+          maxY -
+            minY +
+            padding * 2
+        );
+
+        ctx.restore();
+      }
     }
 
-    context.restore();
-  }, [strokes, selectedIds, zoom, pan]);
+    ctx.restore();
+  }, [
+    strokes,
+    selectedIds,
+    zoom,
+    pan,
+  ]);
 
-  return (
-    <canvas
-      ref={canvasRef}
-      className={`fixed inset-0 z-0 touch-none ${
-        tool === "pen"
-          ? "cursor-crosshair"
-          : tool === "eraser"
-          ? "cursor-cell"
-          : tool === "pan"
-          ? "cursor-grab"
-          : "cursor-default"
-      }`}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
-      onPointerCancel={onPointerUp}
-      onWheel={onWheel}
-      onContextMenu={(e) => e.preventDefault()}
-      onDoubleClick={onClearSelection}
-    />
-  );
-}
+  /*
+   * ============================
+   * CANVAS → BASE64
+   * ============================
+   */
 
-function drawStroke(
-  context: CanvasRenderingContext2D,
-  stroke: Stroke,
-  selected: boolean
-) {
-  const points = stroke.points;
+  const canvasToBase64 = () => {
+    const canvas =
+      canvasRef.current;
 
-  if (points.length === 1) {
-    const p = points[0];
+    if (!canvas) {
+      return "";
+    }
 
-    context.beginPath();
+    return canvas
+      .toDataURL("image/png")
+      .split(",")[1];
+  };
 
-    context.arc(
-      p.x,
-      p.y,
-      stroke.width / 2,
-      0,
-      Math.PI * 2
+  /*
+   * ============================
+   * CLEAN AI RESPONSE
+   * ============================
+   *
+   * Some reasoning models return:
+   *
+   * <think>
+   * internal reasoning...
+   * </think>
+   *
+   * We don't want that shown to the user.
+   */
+
+  const cleanAIContent = (
+    content: string
+  ) => {
+    if (!content) {
+      return "";
+    }
+
+    let cleaned = content;
+
+    // Remove <think>...</think>
+    cleaned = cleaned.replace(
+      /<think>[\s\S]*?<\/think>/gi,
+      ""
     );
 
-    context.fillStyle = stroke.color;
-    context.fill();
+    // Remove any remaining think tags
+    cleaned = cleaned.replace(
+      /<\/?think>/gi,
+      ""
+    );
 
-    return;
-  }
+    // Remove excessive blank lines
+    cleaned = cleaned.replace(
+      /\n{3,}/g,
+      "\n\n"
+    );
 
-  context.beginPath();
+    return cleaned.trim();
+  };
 
-  context.moveTo(points[0].x, points[0].y);
+  /*
+   * ============================
+   * AI ANALYSIS
+   * ============================
+   */
 
-  for (let i = 1; i < points.length; i++) {
-    const p = points[i];
+  const analyzeCanvas =
+    async () => {
+      if (
+        strokes.length === 0
+      ) {
+        alert(
+          "Draw something first."
+        );
 
-    context.lineTo(p.x, p.y);
-  }
+        return;
+      }
 
-  context.lineCap = "round";
-  context.lineJoin = "round";
+      setLoading(true);
 
-  context.strokeStyle = selected
-    ? "#60a5fa"
-    : stroke.color;
+      try {
+        const imageBase64 =
+          canvasToBase64();
 
-  context.lineWidth = selected
-    ? stroke.width + 3
-    : stroke.width;
+        const response =
+          await fetch(
+            API_URL,
+            {
+              method: "POST",
 
-  context.globalAlpha = selected ? 0.85 : 1;
+              headers: {
+                "Content-Type":
+                  "application/json",
+              },
 
-  context.stroke();
+              body: JSON.stringify({
+                image_base64:
+                  imageBase64,
 
-  context.globalAlpha = 1;
+                context: {
+                  zoom,
+
+                  pan_x:
+                    pan.x,
+
+                  pan_y:
+                    pan.y,
+
+                  stroke_count:
+                    strokes.length,
+
+                  region_x: 0,
+
+                  region_y: 0,
+
+                  region_width:
+                    canvasRef.current
+                      ?.width ??
+                    1000,
+
+                  region_height:
+                    canvasRef.current
+                      ?.height ??
+                    700,
+
+                  prompt:
+                    "Analyze this handwritten canvas. Identify the equation or mathematical content. Ignore uncertainty unless necessary. Give only the final useful answer and concise step-by-step solution. Do not include internal reasoning or <think> tags.",
+                },
+
+                trigger:
+                  "explicit",
+              }),
+            }
+          );
+
+        if (
+          !response.ok
+        ) {
+          throw new Error(
+            `Request failed: ${response.status}`
+          );
+        }
+
+        const data =
+          await response.json();
+
+        console.log(
+          "AI RESPONSE:",
+          data
+        );
+
+        /*
+         * Clean content
+         */
+
+        const cleanedContent =
+          cleanAIContent(
+            data.draft?.content || ""
+          );
+
+        const cleanedLatex =
+          cleanAIContent(
+            data.draft?.latex || ""
+          );
+
+        /*
+         * Put result on canvas
+         */
+
+        setDraft({
+          title:
+            data.draft?.title ||
+            "AI Analysis",
+
+          content:
+            cleanedContent ||
+            "No useful result returned.",
+
+          latex:
+            cleanedLatex ||
+            null,
+
+          format:
+            data.draft?.format ||
+            "markdown",
+
+          confidence:
+            data.draft?.confidence ??
+            0,
+
+          /*
+           * Always put result
+           * somewhere visible.
+           */
+
+          x: 520,
+
+          y: 100,
+
+          width:
+            data.draft?.width ??
+            400,
+
+          height:
+            data.draft?.height ??
+            250,
+
+          status:
+            "draft",
+        });
+      } catch (error) {
+        console.error(
+          "AI ERROR:",
+          error
+        );
+
+        alert(
+          "AI analysis failed. Check that the backend is running and your API key is valid."
+        );
+      } finally {
+        setLoading(false);
+      }
+    };
+
+  /*
+   * ============================
+   * ACCEPT
+   * ============================
+   */
+
+  const acceptDraft =
+    () => {
+      if (!draft) return;
+
+      setDraft({
+        ...draft,
+
+        status:
+          "accepted",
+      });
+    };
+
+  /*
+   * ============================
+   * DISCARD
+   * ============================
+   */
+
+  const discardDraft =
+    () => {
+      setDraft(null);
+    };
+
+  /*
+   * ============================
+   * UI
+   * ============================
+   */
+
+  return (
+    <div
+      style={{
+        position:
+          "relative",
+
+        width:
+          "100%",
+
+        height:
+          "100%",
+
+        overflow:
+          "hidden",
+
+        background:
+          "#ffffff",
+      }}
+    >
+
+      {/* =========================
+          TOOLBAR
+          ========================= */}
+
+      <div
+        style={{
+          position:
+            "absolute",
+
+          top: 15,
+
+          left: 15,
+
+          zIndex: 50,
+
+          display:
+            "flex",
+
+          alignItems:
+            "center",
+
+          gap: 8,
+
+          padding: 8,
+
+          background:
+            "#ffffff",
+
+          border:
+            "1px solid #ddd",
+
+          borderRadius:
+            10,
+
+          boxShadow:
+            "0 4px 15px rgba(0,0,0,0.1)",
+        }}
+      >
+
+        {/* PEN */}
+
+        <button
+          onClick={() =>
+            setTool("pen")
+          }
+          style={{
+            padding:
+              "7px 10px",
+
+            background:
+              tool === "pen"
+                ? "#111"
+                : "#eee",
+
+            color:
+              tool === "pen"
+                ? "#fff"
+                : "#111",
+
+            border:
+              "none",
+
+            borderRadius:
+              6,
+
+            cursor:
+              "pointer",
+          }}
+        >
+          ✏ Pen
+        </button>
+
+        {/* ERASER */}
+
+        <button
+          onClick={() =>
+            setTool(
+              "eraser"
+            )
+          }
+          style={{
+            padding:
+              "7px 10px",
+
+            background:
+              tool ===
+              "eraser"
+                ? "#111"
+                : "#eee",
+
+            color:
+              tool ===
+              "eraser"
+                ? "#fff"
+                : "#111",
+
+            border:
+              "none",
+
+            borderRadius:
+              6,
+
+            cursor:
+              "pointer",
+          }}
+        >
+          Eraser
+        </button>
+
+        {/* SELECT */}
+
+        <button
+          onClick={() =>
+            setTool(
+              "select"
+            )
+          }
+          style={{
+            padding:
+              "7px 10px",
+
+            background:
+              tool ===
+              "select"
+                ? "#111"
+                : "#eee",
+
+            color:
+              tool ===
+              "select"
+                ? "#fff"
+                : "#111",
+
+            border:
+              "none",
+
+            borderRadius:
+              6,
+
+            cursor:
+              "pointer",
+          }}
+        >
+          Select
+        </button>
+
+        {/* PAN */}
+
+        <button
+          onClick={() =>
+            setTool("pan")
+          }
+          style={{
+            padding:
+              "7px 10px",
+
+            background:
+              tool === "pan"
+                ? "#111"
+                : "#eee",
+
+            color:
+              tool === "pan"
+                ? "#fff"
+                : "#111",
+
+            border:
+              "none",
+
+            borderRadius:
+              6,
+
+            cursor:
+              "pointer",
+          }}
+        >
+          ✋ Pan
+        </button>
+
+        {/* COLOR */}
+
+        <input
+          type="color"
+          value={color}
+          onChange={(e) =>
+            setColor(
+              e.target.value
+            )
+          }
+          title="Pen colour"
+        />
+
+        {/* STROKE WIDTH */}
+
+        <input
+          type="range"
+          min="1"
+          max="12"
+          value={
+            strokeWidth
+          }
+          onChange={(e) =>
+            setStrokeWidth(
+              Number(
+                e.target.value
+              )
+            )
+          }
+          title="Pen size"
+        />
+
+        {/* UNDO */}
+
+        <button
+          onClick={undo}
+          disabled={
+            !canUndo
+          }
+          style={{
+            cursor:
+              canUndo
+                ? "pointer"
+                : "default",
+          }}
+        >
+          ↶
+        </button>
+
+        {/* REDO */}
+
+        <button
+          onClick={redo}
+          disabled={
+            !canRedo
+          }
+          style={{
+            cursor:
+              canRedo
+                ? "pointer"
+                : "default",
+          }}
+        >
+          ↷
+        </button>
+
+        {/* DELETE */}
+
+        <button
+          onClick={
+            deleteSelected
+          }
+          disabled={
+            selectedIds.length ===
+            0
+          }
+          style={{
+            cursor:
+              selectedIds.length >
+              0
+                ? "pointer"
+                : "default",
+          }}
+        >
+          Delete
+        </button>
+
+        {/* ANALYZE */}
+
+        <button
+          onClick={
+            analyzeCanvas
+          }
+          disabled={
+            loading
+          }
+          style={{
+            padding:
+              "8px 14px",
+
+            border:
+              "none",
+
+            borderRadius:
+              7,
+
+            background:
+              "#111",
+
+            color:
+              "#fff",
+
+            cursor:
+              loading
+                ? "wait"
+                : "pointer",
+          }}
+        >
+          {loading
+            ? "Analyzing..."
+            : "✨ Analyze"}
+        </button>
+      </div>
+
+      {/* =========================
+          CANVAS
+          ========================= */}
+
+      <canvas
+        ref={canvasRef}
+
+        style={{
+          display:
+            "block",
+
+          width:
+            "100%",
+
+          height:
+            "100%",
+
+          background:
+            "#fff",
+
+          touchAction:
+            "none",
+
+          cursor:
+            tool === "pan"
+              ? "grab"
+              : tool ===
+                "eraser"
+              ? "crosshair"
+              : "crosshair",
+        }}
+
+        onPointerDown={
+          handlePointerDown
+        }
+
+        onPointerMove={
+          handlePointerMove
+        }
+
+        onPointerUp={
+          handlePointerUp
+        }
+
+        onPointerCancel={
+          handlePointerUp
+        }
+
+        onWheel={
+          handleWheel
+        }
+      />
+
+      {/* =========================
+          AI DRAFT
+          ========================= */}
+
+      {draft && (
+        <div
+          style={{
+            position:
+              "fixed",
+
+            left:
+              draft.x,
+
+            top:
+              draft.y,
+
+            width:
+              draft.width,
+
+            minHeight:
+              draft.height,
+
+            padding:
+              18,
+
+            background:
+              draft.status ===
+              "accepted"
+                ? "#f0fff4"
+                : "#fffdf0",
+
+            border:
+              draft.status ===
+              "accepted"
+                ? "2px solid #22c55e"
+                : "2px dashed #eab308",
+
+            borderRadius:
+              12,
+
+            boxShadow:
+              "0 8px 30px rgba(0,0,0,0.15)",
+
+            zIndex:
+              9999,
+
+            overflow:
+              "auto",
+
+            fontFamily:
+              "Arial, sans-serif",
+
+            maxHeight:
+              "70vh",
+          }}
+        >
+
+          {/* HEADER */}
+
+          <div
+            style={{
+              display:
+                "flex",
+
+              justifyContent:
+                "space-between",
+
+              alignItems:
+                "center",
+
+              marginBottom:
+                12,
+            }}
+          >
+            <strong
+              style={{
+                fontSize:
+                  17,
+              }}
+            >
+              {draft.title}
+            </strong>
+
+            <span
+              style={{
+                fontSize:
+                  11,
+
+                padding:
+                  "4px 8px",
+
+                borderRadius:
+                  6,
+
+                background:
+                  draft.status ===
+                  "accepted"
+                    ? "#dcfce7"
+                    : "#fef3c7",
+              }}
+            >
+              {draft.status}
+            </span>
+          </div>
+
+          {/* CONTENT */}
+
+          <div
+            style={{
+              fontSize:
+                15,
+
+              lineHeight:
+                1.6,
+
+              whiteSpace:
+                "pre-wrap",
+
+              color:
+                "#111827",
+            }}
+          >
+            {draft.content}
+          </div>
+
+          {/* LATEX */}
+
+          {draft.latex && (
+            <div
+              style={{
+                marginTop:
+                  14,
+
+                padding:
+                  10,
+
+                background:
+                  "#f5f5f5",
+
+                borderRadius:
+                  7,
+
+                fontFamily:
+                  "monospace",
+
+                fontSize:
+                  15,
+              }}
+            >
+              {draft.latex}
+            </div>
+          )}
+
+          {/* CONFIDENCE */}
+
+          <div
+            style={{
+              marginTop:
+                12,
+
+              fontSize:
+                11,
+
+              color:
+                "#666",
+            }}
+          >
+            Confidence:{" "}
+            {Math.round(
+              draft.confidence *
+                100
+            )}
+            %
+          </div>
+
+          {/* ACTIONS */}
+
+          {draft.status ===
+            "draft" && (
+            <div
+              style={{
+                display:
+                  "flex",
+
+                gap: 8,
+
+                marginTop:
+                  14,
+              }}
+            >
+
+              <button
+                onClick={
+                  acceptDraft
+                }
+                style={{
+                  padding:
+                    "8px 14px",
+
+                  border:
+                    "none",
+
+                  borderRadius:
+                    6,
+
+                  background:
+                    "#16a34a",
+
+                  color:
+                    "#fff",
+
+                  cursor:
+                    "pointer",
+                }}
+              >
+                ✓ Accept
+              </button>
+
+              <button
+                onClick={
+                  discardDraft
+                }
+                style={{
+                  padding:
+                    "8px 14px",
+
+                  border:
+                    "none",
+
+                  borderRadius:
+                    6,
+
+                  background:
+                    "#dc2626",
+
+                  color:
+                    "#fff",
+
+                  cursor:
+                    "pointer",
+                }}
+              >
+                ✕ Discard
+              </button>
+
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
-
-function drawGrid(
-  context: CanvasRenderingContext2D,
-  width: number,
-  height: number,
-  zoom: number,
-  pan: { x: number; y: number }
-) {
-  const gridSize = 50;
-
-  const startX =
-    Math.floor(-pan.x / zoom / gridSize) * gridSize -
-    gridSize;
-
-  const startY =
-    Math.floor(-pan.y / zoom / gridSize) * gridSize -
-    gridSize;
-
-  const endX =
-    startX +
-    width / zoom +
-    gridSize * 2;
-
-  const endY =
-    startY +
-    height / zoom +
-    gridSize * 2;
-
-  context.strokeStyle =
-    "rgba(255,255,255,0.04)";
-
-  context.lineWidth = 1 / zoom;
-
-  context.beginPath();
-
-  for (let x = startX; x <= endX; x += gridSize) {
-    context.moveTo(x, startY);
-    context.lineTo(x, endY);
-  }
-
-  for (let y = startY; y <= endY; y += gridSize) {
-    context.moveTo(startX, y);
-    context.lineTo(endX, y);
-  }
-
-  context.stroke();
-}
-
-export default Canvas;
-
