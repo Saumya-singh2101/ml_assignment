@@ -1,4 +1,3 @@
-
 import base64
 import json
 import re
@@ -121,17 +120,14 @@ def analyze(request: AnalyzeRequest):
             capture_end - capture_start
         ) * 1000
 
-
         # =====================================================
         # 2. COMPUTER VISION PREPROCESSING
         # =====================================================
 
         cv_start = time.perf_counter()
 
-        processed_image_bytes = (
-            preprocess_canvas(
-                image_bytes
-            )
+        processed_image_bytes = preprocess_canvas(
+            image_bytes
         )
 
         processed_image_base64 = (
@@ -146,7 +142,6 @@ def analyze(request: AnalyzeRequest):
             cv_end - cv_start
         ) * 1000
 
-
         # =====================================================
         # 3. DISPATCH / CONTEXT PREPARATION
         # =====================================================
@@ -157,8 +152,7 @@ def analyze(request: AnalyzeRequest):
 
         prompt = (
             context.prompt
-            or
-            "Analyze this canvas region and help the user."
+            or "Analyze this canvas region and help the user."
         )
 
         dispatch_end = time.perf_counter()
@@ -166,7 +160,6 @@ def analyze(request: AnalyzeRequest):
         t_dispatch = (
             dispatch_end - dispatch_start
         ) * 1000
-
 
         # =====================================================
         # 4. AI PROVIDER
@@ -195,18 +188,27 @@ def analyze(request: AnalyzeRequest):
             provider_end - provider_start
         ) * 1000
 
-
         # =====================================================
         # 5. PARSE AI RESPONSE
         # =====================================================
 
-        parsed = response
+        # groq_client returns:
+        # {
+        #     "result": {...},
+        #     "usage": {...},
+        #     "latency": {...},
+        #     "cost_usd": ...
+        # }
+
+        parsed = response.get(
+            "result",
+            {}
+        )
 
         if not isinstance(
             parsed,
             dict,
         ):
-
             parsed = {
                 "title": "AI Response",
                 "content": str(parsed),
@@ -214,7 +216,6 @@ def analyze(request: AnalyzeRequest):
                 "format": "markdown",
                 "confidence": 0.5,
             }
-
 
         # =====================================================
         # 6. CONFIDENCE
@@ -236,13 +237,11 @@ def analyze(request: AnalyzeRequest):
             ),
         )
 
-
         # =====================================================
         # 7. DRAFT CREATION
         # =====================================================
 
         draft = DraftResponse(
-
             title=parsed.get(
                 "title",
                 "AI Response",
@@ -290,7 +289,6 @@ def analyze(request: AnalyzeRequest):
             status="draft",
         )
 
-
         # =====================================================
         # 8. RENDER / RESPONSE PREPARATION
         # =====================================================
@@ -306,7 +304,6 @@ def analyze(request: AnalyzeRequest):
             render_end - render_start
         ) * 1000
 
-
         # =====================================================
         # 9. TOTAL END-TO-END LATENCY
         # =====================================================
@@ -316,7 +313,6 @@ def analyze(request: AnalyzeRequest):
         e2e = (
             total_end - total_start
         ) * 1000
-
 
         # =====================================================
         # 10. KPI CALCULATIONS
@@ -332,74 +328,70 @@ def analyze(request: AnalyzeRequest):
         ai_percentage = 0.0
 
         if e2e > 0:
-
             ai_percentage = (
                 provider_time / e2e
             ) * 100
-
 
         # =====================================================
         # 11. TOKEN INFORMATION
         # =====================================================
 
         provider_usage = response.get(
-        "usage",
-        {}
+            "usage",
+            {}
         )
 
         input_text = provider_usage.get(
-        "input_text",
-        0
+            "input_text",
+            0
         )
 
         input_image = provider_usage.get(
-        "input_image",
-        0
+            "input_image",
+            0
         )
 
         output_tokens = provider_usage.get(
-        "output",
-        0
+            "output",
+            0
         )
 
         reasoning = provider_usage.get(
-        "reasoning",
-        0
+            "reasoning",
+            0
         )
 
         cache_read = provider_usage.get(
-        "cache_read",
-        0
+            "cache_read",
+            0
         )
 
         total_tokens = provider_usage.get(
-        "total",
-        input_text
-        + input_image
-        + output_tokens
-        + reasoning
-        + cache_read
+            "total",
+            input_text
+            + input_image
+            + output_tokens
+            + reasoning
+            + cache_read
         )
 
         tokens = {
+            "input_text": input_text,
 
-        "input_text": input_text,
+            "input_image": input_image,
 
-        "input_image": input_image,
-
-        "input_image_source":
-            provider_usage.get(
+            "input_image_source": provider_usage.get(
                 "input_image_source",
                 "included_in_provider_usage"
             ),
 
-        "output": output_tokens,
+            "output": output_tokens,
 
-        "reasoning": reasoning,
+            "reasoning": reasoning,
 
-        "cache_read": cache_read,
+            "cache_read": cache_read,
 
-        "total": total_tokens,
+            "total": total_tokens,
         }
 
         # =====================================================
@@ -407,7 +399,6 @@ def analyze(request: AnalyzeRequest):
         # =====================================================
 
         kpis = {
-
             "request_id": request_id,
 
             "success": True,
@@ -418,7 +409,6 @@ def analyze(request: AnalyzeRequest):
             ),
 
             "latency": {
-
                 "capture_ms": round(
                     t_capture,
                     2,
@@ -461,7 +451,6 @@ def analyze(request: AnalyzeRequest):
             ),
 
             "image": {
-
                 "original_bytes": len(
                     image_bytes
                 ),
@@ -472,8 +461,7 @@ def analyze(request: AnalyzeRequest):
 
                 "compression_ratio": round(
                     len(processed_image_bytes)
-                    /
-                    max(
+                    / max(
                         len(image_bytes),
                         1,
                     ),
@@ -482,18 +470,13 @@ def analyze(request: AnalyzeRequest):
             },
 
             "canvas": {
+                "stroke_count": context.stroke_count,
 
-                "stroke_count":
-                    context.stroke_count,
+                "zoom": context.zoom,
 
-                "zoom":
-                    context.zoom,
+                "region_width": context.region_width,
 
-                "region_width":
-                    context.region_width,
-
-                "region_height":
-                    context.region_height,
+                "region_height": context.region_height,
             },
 
             "tokens": tokens,
@@ -501,13 +484,11 @@ def analyze(request: AnalyzeRequest):
             "cost_usd": 0.0,
         }
 
-
         # =====================================================
         # 13. SAVE KPI TO DATABASE
         # =====================================================
 
         save_analysis_metric(
-
             request_id=request_id,
 
             success=True,
@@ -526,7 +507,6 @@ def analyze(request: AnalyzeRequest):
 
             confidence=confidence,
         )
-
 
         # =====================================================
         # 14. TERMINAL KPI LOG
@@ -568,19 +548,16 @@ def analyze(request: AnalyzeRequest):
             "==================================\n"
         )
 
-
         # =====================================================
         # 15. FINAL RESPONSE
         # =====================================================
 
         return AnalyzeResponse(
-
             request_id=request_id,
 
             draft=draft,
 
             latency_ms={
-
                 "t_capture": round(
                     t_capture,
                     2,
@@ -619,7 +596,6 @@ def analyze(request: AnalyzeRequest):
             cost_usd=0.0,
         )
 
-
     except Exception as exc:
 
         import traceback
@@ -627,9 +603,6 @@ def analyze(request: AnalyzeRequest):
         traceback.print_exc()
 
         raise HTTPException(
-
             status_code=500,
-
             detail=str(exc),
         )
-
