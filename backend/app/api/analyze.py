@@ -1,8 +1,10 @@
+
 import base64
 import json
 import re
 import time
 import uuid
+import traceback
 
 from fastapi import APIRouter, HTTPException
 
@@ -180,6 +182,11 @@ def analyze(request: AnalyzeRequest):
                 "region_height": context.region_height,
                 "prompt": prompt,
             },
+        )
+
+        ai_cost = response.get(
+            "cost_usd",
+            0.0,
         )
 
         provider_end = time.perf_counter()
@@ -377,7 +384,6 @@ def analyze(request: AnalyzeRequest):
 
         tokens = {
             "input_text": input_text,
-
             "input_image": input_image,
 
             "input_image_source": provider_usage.get(
@@ -386,11 +392,8 @@ def analyze(request: AnalyzeRequest):
             ),
 
             "output": output_tokens,
-
             "reasoning": reasoning,
-
             "cache_read": cache_read,
-
             "total": total_tokens,
         }
 
@@ -471,17 +474,14 @@ def analyze(request: AnalyzeRequest):
 
             "canvas": {
                 "stroke_count": context.stroke_count,
-
                 "zoom": context.zoom,
-
                 "region_width": context.region_width,
-
                 "region_height": context.region_height,
             },
 
             "tokens": tokens,
 
-            "cost_usd": 0.0,
+            "cost_usd": ai_cost,
         }
 
         # =====================================================
@@ -545,6 +545,10 @@ def analyze(request: AnalyzeRequest):
         )
 
         print(
+            f"Cost USD         : {ai_cost:.8f}"
+        )
+
+        print(
             "==================================\n"
         )
 
@@ -593,14 +597,62 @@ def analyze(request: AnalyzeRequest):
 
             tokens=tokens,
 
-            cost_usd=0.0,
+            cost_usd=ai_cost,
         )
 
     except Exception as exc:
 
-        import traceback
-
         traceback.print_exc()
+
+        # -------------------------------------------------
+        # SAVE FAILED ANALYSIS TO ANALYTICS
+        # -------------------------------------------------
+
+        try:
+
+            context = request.context
+
+            save_analysis_metric(
+                request_id=request_id,
+
+                success=False,
+
+                stroke_count=context.stroke_count,
+
+                image_size_bytes=(
+                    len(image_bytes)
+                    if "image_bytes" in locals()
+                    else 0
+                ),
+
+                cv_latency_ms=(
+                    t_cv
+                    if "t_cv" in locals()
+                    else 0.0
+                ),
+
+                ai_latency_ms=(
+                    provider_time
+                    if "provider_time" in locals()
+                    else 0.0
+                ),
+
+                e2e_latency_ms=(
+                    (
+                        time.perf_counter()
+                        - total_start
+                    ) * 1000
+                ),
+
+                confidence=0.0,
+            )
+
+        except Exception as analytics_error:
+
+            print(
+                "Failed to save error analytics:",
+                analytics_error,
+            )
 
         raise HTTPException(
             status_code=500,

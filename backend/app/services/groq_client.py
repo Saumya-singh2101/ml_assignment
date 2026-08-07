@@ -30,18 +30,17 @@ MAX_RETRIES = 3
 # Set them in .env if required.
 INPUT_PRICE_PER_1M = float(
     os.getenv(
-        "GROQ_INPUT_PRICE_PER_1M",
+        "INPUT_RATE_PER_MILLION",
         "0"
     )
 )
 
 OUTPUT_PRICE_PER_1M = float(
     os.getenv(
-        "GROQ_OUTPUT_PRICE_PER_1M",
+        "OUTPUT_RATE_PER_MILLION",
         "0"
     )
 )
-
 
 # ============================================================
 # CLEAN MODEL OUTPUT
