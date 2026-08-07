@@ -1,7 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.services.analytics import init_db
 from app.api.analyze import router as analyze_router
+from app.api.analytics import router as analytics_router
 
 
 app = FastAPI(
@@ -28,9 +30,22 @@ app.add_middleware(
 
 
 # --------------------------------------------------
-# Routes
+# DATABASE INITIALIZATION
+# --------------------------------------------------
+
+@app.on_event("startup")
+def startup():
+    init_db()
+
+
+# --------------------------------------------------
+# ROUTES
 # --------------------------------------------------
 
 app.include_router(
     analyze_router
+)
+
+app.include_router(
+    analytics_router
 )
