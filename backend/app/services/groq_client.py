@@ -1,13 +1,19 @@
-import base64
 import json
 import os
 import re
 import time
 
 from groq import Groq
-from groq import APIConnectionError, APIStatusError, RateLimitError
+from groq import (
+    APIConnectionError,
+    APIStatusError,
+    RateLimitError,
+)
 
-from app.core.config import GROQ_API_KEY, MODEL_NAME
+from app.core.config import (
+    GROQ_API_KEY,
+    MODEL_NAME,
+)
 
 
 # ============================================================
@@ -28,14 +34,14 @@ MAX_RETRIES = 3
 INPUT_PRICE_PER_1M = float(
     os.getenv(
         "INPUT_RATE_PER_MILLION",
-        "0"
+        "0",
     )
 )
 
 OUTPUT_PRICE_PER_1M = float(
     os.getenv(
         "OUTPUT_RATE_PER_MILLION",
-        "0"
+        "0",
     )
 )
 
@@ -46,7 +52,12 @@ OUTPUT_PRICE_PER_1M = float(
 
 def clean_model_output(text: str) -> str:
     """
-    Remove Qwen/Groq reasoning blocks.
+    Remove reasoning/thinking blocks from model output.
+
+    Handles:
+    - <think>...</think>
+    - stray <think>
+    - stray </think>
     """
 
     if not text:
@@ -79,25 +90,41 @@ def extract_json(text: str):
 
     Handles:
     - pure JSON
-    - markdown JSON
+    - markdown JSON blocks
     - surrounding text
     - thinking blocks
     """
 
-    text = clean_model_output(text)
+    text = clean_model_output(
+        text
+    )
+
+    if not text:
+        return None
 
     # --------------------------------------------------------
     # Direct JSON
     # --------------------------------------------------------
 
     try:
-        return json.loads(text)
+        parsed = json.loads(
+            text
+        )
 
-    except Exception:
+        if isinstance(
+            parsed,
+            dict,
+        ):
+            return parsed
+
+    except (
+        json.JSONDecodeError,
+        TypeError,
+    ):
         pass
 
     # --------------------------------------------------------
-    # Markdown code block
+    # Markdown JSON code block
     # --------------------------------------------------------
 
     match = re.search(
@@ -109,19 +136,33 @@ def extract_json(text: str):
     if match:
 
         try:
-            return json.loads(
+            parsed = json.loads(
                 match.group(1)
             )
 
-        except Exception:
+            if isinstance(
+                parsed,
+                dict,
+            ):
+                return parsed
+
+        except (
+            json.JSONDecodeError,
+            TypeError,
+        ):
             pass
 
     # --------------------------------------------------------
-    # Find JSON object
+    # JSON object surrounded by text
     # --------------------------------------------------------
 
-    start = text.find("{")
-    end = text.rfind("}")
+    start = text.find(
+        "{"
+    )
+
+    end = text.rfind(
+        "}"
+    )
 
     if (
         start != -1
@@ -130,11 +171,22 @@ def extract_json(text: str):
     ):
 
         try:
-            return json.loads(
-                text[start:end + 1]
+            parsed = json.loads(
+                text[
+                    start:end + 1
+                ]
             )
 
-        except Exception:
+            if isinstance(
+                parsed,
+                dict,
+            ):
+                return parsed
+
+        except (
+            json.JSONDecodeError,
+            TypeError,
+        ):
             pass
 
     return None
@@ -148,6 +200,10 @@ def calculate_cost(
     prompt_tokens: int,
     completion_tokens: int,
 ) -> float:
+    """
+    Calculate estimated AI cost using configured
+    per-million-token rates.
+    """
 
     input_cost = (
         prompt_tokens
@@ -174,6 +230,11 @@ def calculate_cost(
 def fallback_result(
     raw: str,
 ):
+    """
+    Fallback response when model output cannot
+    be parsed as JSON.
+    """
+
     return {
         "title": "AI Analysis",
 
@@ -200,6 +261,87 @@ def fallback_result(
 
 
 # ============================================================
+# SAFE USAGE HELPERS
+# ============================================================
+
+def get_usage_value(
+    usage,
+    attribute: str,
+    default: int = 0,
+) -> int:
+    """
+    Safely read an integer usage field from
+    the Groq usage object.
+    """
+
+    if usage is None:
+        return default
+
+    value = getattr(
+        usage,
+        attribute,
+        default,
+    )
+
+    try:
+        return int(
+            value or 0
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return default
+
+
+def get_nested_usage_value(
+    usage,
+    parent_attribute: str,
+    child_attribute: str,
+    default: int = 0,
+) -> int:
+    """
+    Safely read nested usage information such as:
+
+        usage.prompt_tokens_details.cached_tokens
+
+    or
+
+        usage.completion_tokens_details.reasoning_tokens
+    """
+
+    if usage is None:
+        return default
+
+    parent = getattr(
+        usage,
+        parent_attribute,
+        None,
+    )
+
+    if parent is None:
+        return default
+
+    value = getattr(
+        parent,
+        child_attribute,
+        default,
+    )
+
+    try:
+        return int(
+            value or 0
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return default
+
+
+# ============================================================
 # ANALYZE CANVAS
 # ============================================================
 
@@ -208,32 +350,38 @@ def analyze_canvas(
     context: dict,
 ):
     """
-    Send processed canvas image to Groq vision model.
-
-    Streaming metrics:
-
-        ttfb_ms
-            Time until first streamed chunk.
-
-        ttft_ms
-            Time until first actual text content.
-
-        stream_ms
-            Time spent receiving the stream after
-            the first chunk.
-
-        provider_ms
-            Complete provider request duration.
+    Send a processed canvas image to the Groq vision model.
 
     Returns:
 
     {
         "result": {...},
-        "usage": {...},
-        "latency": {...},
+
+        "usage": {
+            "input_text": ...,
+            "input_image": ...,
+            "input_image_source": ...,
+            "output": ...,
+            "reasoning": ...,
+            "cache_read": ...,
+            "total": ...
+        },
+
+        "latency": {
+            "provider_ms": ...,
+            "ttfb_ms": ...,
+            "ttft_ms": ...,
+            "stream_ms": ...,
+            "attempt": ...
+        },
+
         "cost_usd": ...
     }
     """
+
+    # ========================================================
+    # PROMPT
+    # ========================================================
 
     prompt = f"""
 You are an AI whiteboard assistant.
@@ -288,7 +436,7 @@ Canvas context:
 
 {json.dumps(
     context,
-    ensure_ascii=False
+    ensure_ascii=False,
 )}
 """
 
@@ -303,7 +451,9 @@ Canvas context:
         MAX_RETRIES + 1,
     ):
 
-        request_start = time.perf_counter()
+        request_start = (
+            time.perf_counter()
+        )
 
         try:
 
@@ -321,6 +471,7 @@ Canvas context:
                         "content": [
                             {
                                 "type": "text",
+
                                 "text": prompt,
                             },
 
@@ -330,7 +481,7 @@ Canvas context:
                                 "image_url": {
                                     "url":
                                         "data:image/png;base64,"
-                                        + image_base64
+                                        + image_base64,
                                 },
                             },
                         ],
@@ -339,10 +490,10 @@ Canvas context:
 
                 temperature=0.1,
 
+                # Groq supports streamed responses.
                 stream=True,
 
             )
-
             # =================================================
             # STREAM METRICS
             # =================================================
@@ -361,10 +512,12 @@ Canvas context:
 
             for chunk in stream:
 
-                current_time = time.perf_counter()
+                current_time = (
+                    time.perf_counter()
+                )
 
                 # -------------------------------------------------
-                # First chunk = TTFB
+                # FIRST STREAM CHUNK = TTFB
                 # -------------------------------------------------
 
                 if first_chunk_time is None:
@@ -375,8 +528,12 @@ Canvas context:
                     ) * 1000
 
                 # -------------------------------------------------
-                # Usage may arrive in final chunk
+                # USAGE
                 # -------------------------------------------------
+                #
+                # Usage can arrive in the final streamed
+                # chunk when include_usage=True.
+                #
 
                 chunk_usage = getattr(
                     chunk,
@@ -386,10 +543,12 @@ Canvas context:
 
                 if chunk_usage is not None:
 
-                    usage = chunk_usage
+                    usage = (
+                        chunk_usage
+                    )
 
                 # -------------------------------------------------
-                # Extract streamed text
+                # EXTRACT STREAMED TEXT
                 # -------------------------------------------------
 
                 choices = getattr(
@@ -418,7 +577,7 @@ Canvas context:
 
                 if content:
 
-                    # First actual text content = TTFT
+                    # First actual text token/content = TTFT
                     if first_text_time is None:
 
                         first_text_time = (
@@ -434,7 +593,9 @@ Canvas context:
             # STREAM FINISHED
             # =================================================
 
-            request_end = time.perf_counter()
+            request_end = (
+                time.perf_counter()
+            )
 
             provider_latency = (
                 request_end
@@ -442,7 +603,7 @@ Canvas context:
             ) * 1000
 
             # =================================================
-            # CALCULATE STREAM METRICS
+            # TTFB
             # =================================================
 
             if first_chunk_time is None:
@@ -453,6 +614,10 @@ Canvas context:
 
                 ttfb = first_chunk_time
 
+            # =================================================
+            # TTFT
+            # =================================================
+
             if first_text_time is None:
 
                 ttft = ttfb
@@ -461,13 +626,18 @@ Canvas context:
 
                 ttft = first_text_time
 
+            # =================================================
+            # STREAM TIME
+            # =================================================
+
             stream_latency = max(
-                provider_latency - ttfb,
+                provider_latency
+                - ttfb,
                 0.0,
             )
 
             # =================================================
-            # COMBINE STREAMED RESPONSE
+            # COMBINE RESPONSE
             # =================================================
 
             raw = "".join(
@@ -482,7 +652,9 @@ Canvas context:
                 "RAW AI RESPONSE:"
             )
 
-            print(raw)
+            print(
+                raw
+            )
 
             print(
                 "==============================\n"
@@ -494,6 +666,10 @@ Canvas context:
 
             print(
                 "\n========== GROQ STREAM DEBUG =========="
+            )
+
+            print(
+                f"Attempt: {attempt}"
             )
 
             print(
@@ -517,7 +693,7 @@ Canvas context:
             )
 
             # =================================================
-            # PARSE
+            # PARSE RESPONSE
             # =================================================
 
             result = extract_json(
@@ -531,8 +707,73 @@ Canvas context:
                 )
 
             # =================================================
-            # USAGE DEBUG
+            # TOKEN INFORMATION
             # =================================================
+
+            prompt_tokens = (
+                get_usage_value(
+                    usage,
+                    "prompt_tokens",
+                )
+            )
+
+            completion_tokens = (
+                get_usage_value(
+                    usage,
+                    "completion_tokens",
+                )
+            )
+
+            total_tokens = (
+                get_usage_value(
+                    usage,
+                    "total_tokens",
+                    prompt_tokens
+                    + completion_tokens,
+                )
+            )
+
+            # -------------------------------------------------
+            # CACHED TOKENS
+            # -------------------------------------------------
+
+            cache_read_tokens = (
+                get_nested_usage_value(
+                    usage,
+                    "prompt_tokens_details",
+                    "cached_tokens",
+                )
+            )
+
+            # -------------------------------------------------
+            # REASONING TOKENS
+            # -------------------------------------------------
+
+            reasoning_tokens = (
+                get_nested_usage_value(
+                    usage,
+                    "completion_tokens_details",
+                    "reasoning_tokens",
+                )
+            )
+
+            # -------------------------------------------------
+            # IMAGE TOKENS
+            # -------------------------------------------------
+            #
+            # Groq's standard usage response reports total
+            # prompt tokens. It does not reliably expose a
+            # separate image-token count in the documented
+            # usage structure.
+            #
+            # Therefore we DO NOT invent an image-token value.
+            #
+
+            input_image_tokens = 0
+
+            # -------------------------------------------------
+            # DEBUG USAGE
+            # -------------------------------------------------
 
             print(
                 "\n========== GROQ USAGE DEBUG =========="
@@ -540,70 +781,41 @@ Canvas context:
 
             print(
                 "usage object:",
-                usage
+                usage,
             )
 
             print(
                 "prompt_tokens:",
-                getattr(
-                    usage,
-                    "prompt_tokens",
-                    None,
-                )
+                prompt_tokens,
             )
 
             print(
                 "completion_tokens:",
-                getattr(
-                    usage,
-                    "completion_tokens",
-                    None,
-                )
+                completion_tokens,
+            )
+
+            print(
+                "cached_tokens:",
+                cache_read_tokens,
+            )
+
+            print(
+                "reasoning_tokens:",
+                reasoning_tokens,
             )
 
             print(
                 "total_tokens:",
-                getattr(
-                    usage,
-                    "total_tokens",
-                    None,
-                )
+                total_tokens,
+            )
+
+            print(
+                "image_tokens:",
+                input_image_tokens,
             )
 
             print(
                 "======================================\n"
-            )
-
-            # =================================================
-            # TOKEN COUNTS
-            # =================================================
-
-            prompt_tokens = int(
-                getattr(
-                    usage,
-                    "prompt_tokens",
-                    0,
-                )
-                or 0
-            )
-
-            completion_tokens = int(
-                getattr(
-                    usage,
-                    "completion_tokens",
-                    0,
-                )
-                or 0
-            )
-
-            total_tokens = int(
-                getattr(
-                    usage,
-                    "total_tokens",
-                    prompt_tokens
-                    + completion_tokens,
-                )
-                or 0
             )
 
             # =================================================
@@ -626,17 +838,20 @@ Canvas context:
                     "input_text":
                         prompt_tokens,
 
-                    "input_image": 0,
+                    "input_image":
+                        input_image_tokens,
 
                     "input_image_source":
-                        "included_in_provider_usage",
+                        "not_separately_reported_by_provider",
 
                     "output":
                         completion_tokens,
 
-                    "reasoning": 0,
+                    "reasoning":
+                        reasoning_tokens,
 
-                    "cache_read": 0,
+                    "cache_read":
+                        cache_read_tokens,
 
                     "total":
                         total_tokens,
@@ -678,9 +893,9 @@ Canvas context:
                     ),
             }
 
-        # =====================================================
-        # RATE LIMIT
-        # =====================================================
+        # ========================================================
+        # RATE LIMIT ERROR
+        # ========================================================
 
         except RateLimitError as exc:
 
@@ -697,9 +912,9 @@ Canvas context:
                     2 ** attempt
                 )
 
-        # =====================================================
+        # ========================================================
         # CONNECTION ERROR
-        # =====================================================
+        # ========================================================
 
         except APIConnectionError as exc:
 
@@ -716,29 +931,35 @@ Canvas context:
                     2 ** attempt
                 )
 
-        # =====================================================
+        # ========================================================
         # API STATUS ERROR
-        # =====================================================
+        # ========================================================
 
         except APIStatusError as exc:
 
-            # Do NOT retry authentication errors.
-
-            if getattr(
+            status_code = getattr(
                 exc,
                 "status_code",
-                None
-            ) in [
+                None,
+            )
+
+            # ----------------------------------------------------
+            # Authentication / authorization errors
+            # should NOT be retried.
+            # ----------------------------------------------------
+
+            if status_code in (
                 401,
                 403,
-            ]:
+            ):
 
                 raise
 
             last_error = exc
 
             print(
-                f"Groq API error. "
+                f"Groq API error "
+                f"(status={status_code}). "
                 f"Attempt {attempt}/{MAX_RETRIES}"
             )
 
@@ -748,9 +969,9 @@ Canvas context:
                     2 ** attempt
                 )
 
-        # =====================================================
+        # ========================================================
         # UNKNOWN ERROR
-        # =====================================================
+        # ========================================================
 
         except Exception as exc:
 
