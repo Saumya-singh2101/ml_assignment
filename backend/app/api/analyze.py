@@ -1,4 +1,3 @@
-
 import base64
 import json
 import re
@@ -104,6 +103,29 @@ def analyze(request: AnalyzeRequest):
 
     total_start = time.perf_counter()
 
+    # Defaults used if an error happens early
+    image_bytes = b""
+    processed_image_bytes = b""
+
+    t_capture = 0.0
+    t_cv = 0.0
+    t_dispatch = 0.0
+    t_render = 0.0
+    provider_time = 0.0
+
+    ttfb = 0.0
+    ttft = 0.0
+    stream_time = 0.0
+
+    input_text = 0
+    input_image = 0
+    output_tokens = 0
+    reasoning = 0
+    cache_read = 0
+    total_tokens = 0
+
+    ai_cost = 0.0
+
     try:
 
         # =====================================================
@@ -184,11 +206,6 @@ def analyze(request: AnalyzeRequest):
             },
         )
 
-        ai_cost = response.get(
-            "cost_usd",
-            0.0,
-        )
-
         provider_end = time.perf_counter()
 
         provider_time = (
@@ -196,20 +213,110 @@ def analyze(request: AnalyzeRequest):
         ) * 1000
 
         # =====================================================
-        # 5. PARSE AI RESPONSE
+        # 5. PROVIDER LATENCY METRICS
         # =====================================================
 
-        # groq_client returns:
-        # {
-        #     "result": {...},
-        #     "usage": {...},
-        #     "latency": {...},
-        #     "cost_usd": ...
-        # }
+        provider_latency = response.get(
+            "latency",
+            {}
+        )
+
+        ttfb = provider_latency.get(
+            "ttfb_ms",
+            provider_time,
+        )
+
+        ttft = provider_latency.get(
+            "ttft_ms",
+            provider_time,
+        )
+
+        stream_time = provider_latency.get(
+            "stream_ms",
+            max(
+                provider_time - ttfb,
+                0.0,
+            ),
+        )
+
+        # =====================================================
+        # 6. TOKEN INFORMATION
+        # =====================================================
+
+        provider_usage = response.get(
+            "usage",
+            {}
+        )
+
+        input_text = provider_usage.get(
+            "input_text",
+            0,
+        )
+
+        input_image = provider_usage.get(
+            "input_image",
+            0,
+        )
+
+        output_tokens = provider_usage.get(
+            "output",
+            0,
+        )
+
+        reasoning = provider_usage.get(
+            "reasoning",
+            0,
+        )
+
+        cache_read = provider_usage.get(
+            "cache_read",
+            0,
+        )
+
+        total_tokens = provider_usage.get(
+            "total",
+            input_text
+            + input_image
+            + output_tokens
+            + reasoning
+            + cache_read,
+        )
+
+        tokens = {
+            "input_text": input_text,
+
+            "input_image": input_image,
+
+            "input_image_source": provider_usage.get(
+                "input_image_source",
+                "included_in_provider_usage",
+            ),
+
+            "output": output_tokens,
+
+            "reasoning": reasoning,
+
+            "cache_read": cache_read,
+
+            "total": total_tokens,
+        }
+
+        # =====================================================
+        # 7. COST
+        # =====================================================
+
+        ai_cost = response.get(
+            "cost_usd",
+            0.0,
+        )
+
+        # =====================================================
+        # 8. PARSE AI RESPONSE
+        # =====================================================
 
         parsed = response.get(
             "result",
-            {}
+            {},
         )
 
         if not isinstance(
@@ -225,7 +332,7 @@ def analyze(request: AnalyzeRequest):
             }
 
         # =====================================================
-        # 6. CONFIDENCE
+        # 9. CONFIDENCE
         # =====================================================
 
         confidence = float(
@@ -245,7 +352,7 @@ def analyze(request: AnalyzeRequest):
         )
 
         # =====================================================
-        # 7. DRAFT CREATION
+        # 10. DRAFT CREATION
         # =====================================================
 
         draft = DraftResponse(
@@ -297,7 +404,7 @@ def analyze(request: AnalyzeRequest):
         )
 
         # =====================================================
-        # 8. RENDER / RESPONSE PREPARATION
+        # 11. RENDER / RESPONSE PREPARATION
         # =====================================================
 
         render_start = time.perf_counter()
@@ -312,7 +419,7 @@ def analyze(request: AnalyzeRequest):
         ) * 1000
 
         # =====================================================
-        # 9. TOTAL END-TO-END LATENCY
+        # 12. TOTAL END-TO-END LATENCY
         # =====================================================
 
         total_end = time.perf_counter()
@@ -322,7 +429,7 @@ def analyze(request: AnalyzeRequest):
         ) * 1000
 
         # =====================================================
-        # 10. KPI CALCULATIONS
+        # 13. KPI CALCULATIONS
         # =====================================================
 
         processing_time = (
@@ -340,65 +447,7 @@ def analyze(request: AnalyzeRequest):
             ) * 100
 
         # =====================================================
-        # 11. TOKEN INFORMATION
-        # =====================================================
-
-        provider_usage = response.get(
-            "usage",
-            {}
-        )
-
-        input_text = provider_usage.get(
-            "input_text",
-            0
-        )
-
-        input_image = provider_usage.get(
-            "input_image",
-            0
-        )
-
-        output_tokens = provider_usage.get(
-            "output",
-            0
-        )
-
-        reasoning = provider_usage.get(
-            "reasoning",
-            0
-        )
-
-        cache_read = provider_usage.get(
-            "cache_read",
-            0
-        )
-
-        total_tokens = provider_usage.get(
-            "total",
-            input_text
-            + input_image
-            + output_tokens
-            + reasoning
-            + cache_read
-        )
-
-        tokens = {
-            "input_text": input_text,
-            "input_image": input_image,
-
-            "input_image_source": provider_usage.get(
-                "input_image_source",
-                "included_in_provider_usage"
-            ),
-
-            "output": output_tokens,
-            "reasoning": reasoning,
-            "cache_read": cache_read,
-            "total": total_tokens,
-        }
-
-        # =====================================================
-        # 12. FINAL KPI OBJECT
+        # 14. FINAL KPI OBJECT
         # =====================================================
 
         kpis = {
@@ -429,6 +478,21 @@ def analyze(request: AnalyzeRequest):
 
                 "ai_ms": round(
                     provider_time,
+                    2,
+                ),
+
+                "ttfb_ms": round(
+                    ttfb,
+                    2,
+                ),
+
+                "ttft_ms": round(
+                    ttft,
+                    2,
+                ),
+
+                "stream_ms": round(
+                    stream_time,
                     2,
                 ),
 
@@ -474,8 +538,11 @@ def analyze(request: AnalyzeRequest):
 
             "canvas": {
                 "stroke_count": context.stroke_count,
+
                 "zoom": context.zoom,
+
                 "region_width": context.region_width,
+
                 "region_height": context.region_height,
             },
 
@@ -485,7 +552,7 @@ def analyze(request: AnalyzeRequest):
         }
 
         # =====================================================
-        # 13. SAVE KPI TO DATABASE
+        # 15. SAVE KPI TO DATABASE
         # =====================================================
 
         save_analysis_metric(
@@ -506,10 +573,27 @@ def analyze(request: AnalyzeRequest):
             e2e_latency_ms=e2e,
 
             confidence=confidence,
+
+            # NEW: STREAMING METRICS
+            ttfb_ms=ttfb,
+
+            ttft_ms=ttft,
+
+            stream_ms=stream_time,
+
+            # NEW: TOKEN METRICS
+            input_tokens=input_text,
+
+            output_tokens=output_tokens,
+
+            total_tokens=total_tokens,
+
+            # NEW: COST
+            cost_usd=ai_cost,
         )
 
         # =====================================================
-        # 14. TERMINAL KPI LOG
+        # 16. TERMINAL KPI LOG
         # =====================================================
 
         print(
@@ -533,7 +617,31 @@ def analyze(request: AnalyzeRequest):
         )
 
         print(
+            f"TTFB             : {ttfb:.2f} ms"
+        )
+
+        print(
+            f"TTFT             : {ttft:.2f} ms"
+        )
+
+        print(
+            f"Stream Time      : {stream_time:.2f} ms"
+        )
+
+        print(
             f"Total Time       : {e2e:.2f} ms"
+        )
+
+        print(
+            f"Input Tokens     : {input_text}"
+        )
+
+        print(
+            f"Output Tokens    : {output_tokens}"
+        )
+
+        print(
+            f"Total Tokens     : {total_tokens}"
         )
 
         print(
@@ -553,7 +661,7 @@ def analyze(request: AnalyzeRequest):
         )
 
         # =====================================================
-        # 15. FINAL RESPONSE
+        # 17. FINAL RESPONSE
         # =====================================================
 
         return AnalyzeResponse(
@@ -573,16 +681,19 @@ def analyze(request: AnalyzeRequest):
                 ),
 
                 "ttfb": round(
-                    provider_time,
+                    ttfb,
                     2,
                 ),
 
                 "ttft": round(
-                    provider_time,
+                    ttft,
                     2,
                 ),
 
-                "t_stream": 0.0,
+                "t_stream": round(
+                    stream_time,
+                    2,
+                ),
 
                 "t_render": round(
                     t_render,
@@ -612,6 +723,11 @@ def analyze(request: AnalyzeRequest):
 
             context = request.context
 
+            failed_e2e = (
+                time.perf_counter()
+                - total_start
+            ) * 1000
+
             save_analysis_metric(
                 request_id=request_id,
 
@@ -619,32 +735,31 @@ def analyze(request: AnalyzeRequest):
 
                 stroke_count=context.stroke_count,
 
-                image_size_bytes=(
-                    len(image_bytes)
-                    if "image_bytes" in locals()
-                    else 0
+                image_size_bytes=len(
+                    image_bytes
                 ),
 
-                cv_latency_ms=(
-                    t_cv
-                    if "t_cv" in locals()
-                    else 0.0
-                ),
+                cv_latency_ms=t_cv,
 
-                ai_latency_ms=(
-                    provider_time
-                    if "provider_time" in locals()
-                    else 0.0
-                ),
+                ai_latency_ms=provider_time,
 
-                e2e_latency_ms=(
-                    (
-                        time.perf_counter()
-                        - total_start
-                    ) * 1000
-                ),
+                e2e_latency_ms=failed_e2e,
 
                 confidence=0.0,
+
+                ttfb_ms=ttfb,
+
+                ttft_ms=ttft,
+
+                stream_ms=stream_time,
+
+                input_tokens=input_text,
+
+                output_tokens=output_tokens,
+
+                total_tokens=total_tokens,
+
+                cost_usd=ai_cost,
             )
 
         except Exception as analytics_error:

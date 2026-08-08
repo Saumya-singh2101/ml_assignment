@@ -1,4 +1,3 @@
-
 import base64
 import json
 import os
@@ -26,8 +25,6 @@ client = Groq(
 
 MAX_RETRIES = 3
 
-# Keep these configurable because pricing can change.
-# Set them in .env if required.
 INPUT_PRICE_PER_1M = float(
     os.getenv(
         "INPUT_RATE_PER_MILLION",
@@ -42,20 +39,19 @@ OUTPUT_PRICE_PER_1M = float(
     )
 )
 
+
 # ============================================================
 # CLEAN MODEL OUTPUT
 # ============================================================
 
 def clean_model_output(text: str) -> str:
     """
-    Remove Qwen/Groq reasoning blocks and
-    accidental markdown wrappers.
+    Remove Qwen/Groq reasoning blocks.
     """
 
     if not text:
         return ""
 
-    # Remove <think>...</think>
     text = re.sub(
         r"<think>.*?</think>",
         "",
@@ -63,7 +59,6 @@ def clean_model_output(text: str) -> str:
         flags=re.DOTALL | re.IGNORECASE,
     )
 
-    # Remove leftover think tags
     text = re.sub(
         r"</?think>",
         "",
@@ -112,6 +107,7 @@ def extract_json(text: str):
     )
 
     if match:
+
         try:
             return json.loads(
                 match.group(1)
@@ -132,6 +128,7 @@ def extract_json(text: str):
         and end != -1
         and end > start
     ):
+
         try:
             return json.loads(
                 text[start:end + 1]
@@ -212,6 +209,21 @@ def analyze_canvas(
 ):
     """
     Send processed canvas image to Groq vision model.
+
+    Streaming metrics:
+
+        ttfb_ms
+            Time until first streamed chunk.
+
+        ttft_ms
+            Time until first actual text content.
+
+        stream_ms
+            Time spent receiving the stream after
+            the first chunk.
+
+        provider_ms
+            Complete provider request duration.
 
     Returns:
 
@@ -295,7 +307,11 @@ Canvas context:
 
         try:
 
-            response = client.chat.completions.create(
+            # =================================================
+            # STREAMING REQUEST
+            # =================================================
+
+            stream = client.chat.completions.create(
                 model=MODEL_NAME,
 
                 messages=[
@@ -322,7 +338,101 @@ Canvas context:
                 ],
 
                 temperature=0.1,
+
+                stream=True,
+
             )
+
+            # =================================================
+            # STREAM METRICS
+            # =================================================
+
+            first_chunk_time = None
+
+            first_text_time = None
+
+            chunks = []
+
+            usage = None
+
+            # =================================================
+            # READ STREAM
+            # =================================================
+
+            for chunk in stream:
+
+                current_time = time.perf_counter()
+
+                # -------------------------------------------------
+                # First chunk = TTFB
+                # -------------------------------------------------
+
+                if first_chunk_time is None:
+
+                    first_chunk_time = (
+                        current_time
+                        - request_start
+                    ) * 1000
+
+                # -------------------------------------------------
+                # Usage may arrive in final chunk
+                # -------------------------------------------------
+
+                chunk_usage = getattr(
+                    chunk,
+                    "usage",
+                    None,
+                )
+
+                if chunk_usage is not None:
+
+                    usage = chunk_usage
+
+                # -------------------------------------------------
+                # Extract streamed text
+                # -------------------------------------------------
+
+                choices = getattr(
+                    chunk,
+                    "choices",
+                    None,
+                )
+
+                if not choices:
+                    continue
+
+                delta = getattr(
+                    choices[0],
+                    "delta",
+                    None,
+                )
+
+                if delta is None:
+                    continue
+
+                content = getattr(
+                    delta,
+                    "content",
+                    None,
+                )
+
+                if content:
+
+                    # First actual text content = TTFT
+                    if first_text_time is None:
+
+                        first_text_time = (
+                            current_time
+                            - request_start
+                        ) * 1000
+
+                    chunks.append(
+                        content
+                    )
+
+            # =================================================
+            # STREAM FINISHED
+            # =================================================
 
             request_end = time.perf_counter()
 
@@ -332,15 +442,36 @@ Canvas context:
             ) * 1000
 
             # =================================================
-            # RAW RESPONSE
+            # CALCULATE STREAM METRICS
             # =================================================
 
-            raw = (
-                response
-                .choices[0]
-                .message
-                .content
-                or ""
+            if first_chunk_time is None:
+
+                ttfb = provider_latency
+
+            else:
+
+                ttfb = first_chunk_time
+
+            if first_text_time is None:
+
+                ttft = ttfb
+
+            else:
+
+                ttft = first_text_time
+
+            stream_latency = max(
+                provider_latency - ttfb,
+                0.0,
+            )
+
+            # =================================================
+            # COMBINE STREAMED RESPONSE
+            # =================================================
+
+            raw = "".join(
+                chunks
             )
 
             print(
@@ -358,6 +489,34 @@ Canvas context:
             )
 
             # =================================================
+            # STREAMING DEBUG
+            # =================================================
+
+            print(
+                "\n========== GROQ STREAM DEBUG =========="
+            )
+
+            print(
+                f"TTFB: {ttfb:.2f} ms"
+            )
+
+            print(
+                f"TTFT: {ttft:.2f} ms"
+            )
+
+            print(
+                f"Stream time: {stream_latency:.2f} ms"
+            )
+
+            print(
+                f"Provider time: {provider_latency:.2f} ms"
+            )
+
+            print(
+                "=======================================\n"
+            )
+
+            # =================================================
             # PARSE
             # =================================================
 
@@ -366,21 +525,15 @@ Canvas context:
             )
 
             if result is None:
+
                 result = fallback_result(
                     raw
                 )
 
             # =================================================
-            # USAGE
+            # USAGE DEBUG
             # =================================================
 
-            usage = getattr(
-                response,
-                "usage",
-                None,
-            )
-
-            # DEBUG USAGE
             print(
                 "\n========== GROQ USAGE DEBUG =========="
             )
@@ -420,6 +573,10 @@ Canvas context:
             print(
                 "======================================\n"
             )
+
+            # =================================================
+            # TOKEN COUNTS
+            # =================================================
 
             prompt_tokens = int(
                 getattr(
@@ -492,6 +649,24 @@ Canvas context:
                             2,
                         ),
 
+                    "ttfb_ms":
+                        round(
+                            ttfb,
+                            2,
+                        ),
+
+                    "ttft_ms":
+                        round(
+                            ttft,
+                            2,
+                        ),
+
+                    "stream_ms":
+                        round(
+                            stream_latency,
+                            2,
+                        ),
+
                     "attempt":
                         attempt,
                 },
@@ -517,6 +692,7 @@ Canvas context:
             )
 
             if attempt < MAX_RETRIES:
+
                 time.sleep(
                     2 ** attempt
                 )
@@ -535,6 +711,7 @@ Canvas context:
             )
 
             if attempt < MAX_RETRIES:
+
                 time.sleep(
                     2 ** attempt
                 )
@@ -546,6 +723,7 @@ Canvas context:
         except APIStatusError as exc:
 
             # Do NOT retry authentication errors.
+
             if getattr(
                 exc,
                 "status_code",
@@ -554,6 +732,7 @@ Canvas context:
                 401,
                 403,
             ]:
+
                 raise
 
             last_error = exc
@@ -564,6 +743,7 @@ Canvas context:
             )
 
             if attempt < MAX_RETRIES:
+
                 time.sleep(
                     2 ** attempt
                 )
@@ -582,6 +762,7 @@ Canvas context:
             )
 
             if attempt < MAX_RETRIES:
+
                 time.sleep(
                     2 ** attempt
                 )
